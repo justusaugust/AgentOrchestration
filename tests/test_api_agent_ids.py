@@ -30,6 +30,16 @@ def test_missing_authorization_denies_agent_route_before_handling():
     assert registry.get(agent_id) is not None
 
 
+def test_missing_authorization_denies_mutation_before_handling():
+    client, registry = make_client()
+    agent_id = registry.register("test-agent", "worker.processor")
+
+    response = client.post(f"/api/v2/agents/{mixed_case(agent_id)}/start")
+
+    assert response.status_code == 401
+    assert registry.get(agent_id)["status"] == "pending"
+
+
 def test_malformed_agent_id_returns_400_without_mutation():
     client, registry = make_client()
     agent_id = registry.register("test-agent", "worker.processor")
@@ -68,6 +78,20 @@ def test_malformed_agent_id_delete_returns_400_without_mutation():
 
     assert response.status_code == 400
     assert registry.get(agent_id) is not None
+    assert registry.count() == 1
+
+
+def test_noncanonical_agent_id_returns_400_without_mutation():
+    client, registry = make_client()
+    agent_id = registry.register("test-agent", "worker.processor")
+
+    response = client.post(
+        f"/api/v2/agents/{agent_id.replace('-', '')}/start",
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 400
+    assert registry.get(agent_id)["status"] == "pending"
     assert registry.count() == 1
 
 

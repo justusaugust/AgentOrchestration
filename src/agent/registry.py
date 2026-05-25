@@ -1,9 +1,19 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
+import re
 import time
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+
+_AGENT_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$"
+)
 
 
 class AgentStatus(Enum):
@@ -52,9 +62,14 @@ class AgentRegistry:
 
     @staticmethod
     def _normalize_agent_id(agent_id: str) -> str:
+        if (
+            not isinstance(agent_id, str)
+            or not _AGENT_ID_PATTERN.fullmatch(agent_id)
+        ):
+            raise AgentIdValidationError("Malformed agent id")
         try:
             return str(uuid.UUID(agent_id))
-        except (AttributeError, TypeError, ValueError):
+        except ValueError:
             raise AgentIdValidationError("Malformed agent id") from None
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:

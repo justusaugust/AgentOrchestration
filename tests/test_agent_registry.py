@@ -67,6 +67,12 @@ class TestAgentRegistry:
         with pytest.raises(AgentIdValidationError):
             self.registry.get("not-a-uuid")
 
+    def test_noncanonical_id_fails_before_lookup(self):
+        agent_id = self.registry.register("test-agent", "worker.processor")
+
+        with pytest.raises(AgentIdValidationError):
+            self.registry.get(agent_id.replace("-", ""))
+
     def test_malformed_id_fails_before_status_mutation(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
 
