@@ -97,6 +97,29 @@ class TestAgentRegistryRetirement:
         assert events[0].agent["id"] == agent_id
         assert "config" not in events[0].agent
 
+    def test_listener_exception_does_not_break_delete(self):
+        events = []
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            config={"secret": "value"},
+        )
+
+        def broken_listener(event):
+            raise RuntimeError("listener failed")
+
+        self.registry.add_listener(broken_listener)
+        self.registry.add_listener(events.append)
+
+        assert self.registry.delete(agent_id)
+        assert len(events) == 1
+        audit = self.registry.audit_log()
+        assert audit[-1]["event"] == "registry_listener_failed"
+        assert audit[-1]["agent_id"] == agent_id
+        assert audit[-1]["reason"] == "RuntimeError"
+        assert "config" not in audit[-1]
+        assert "secret" not in audit[-1]
+
 # 2019-01-23T10:28:57 update
 
 # 2019-01-28T18:15:57 update

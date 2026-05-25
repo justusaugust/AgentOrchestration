@@ -85,9 +85,25 @@ class TestTaskSchedulerRetirement:
             self.scheduler.schedule(task, delay=0)
         assert asyncio.run(self.scheduler.dequeue()) is None
 
+    def test_schedule_rejects_retired_agent_id_before_commit(self):
+        self.scheduler.retire_agent("agent-retired")
+        task = {"type": "work", "agent_id": "agent-retired"}
+        with pytest.raises(ValueError):
+            self.scheduler.schedule(task, delay=0)
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
     def test_enqueue_rejects_retired_agent_before_commit(self):
         self.scheduler.retire_agent("agent-retired")
         task = {"type": "work", "target_agent": "agent-retired"}
+
+        with pytest.raises(ValueError):
+            self.scheduler.enqueue(task)
+
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_enqueue_rejects_retired_agent_id_before_commit(self):
+        self.scheduler.retire_agent("agent-retired")
+        task = {"type": "work", "agent_id": "agent-retired"}
 
         with pytest.raises(ValueError):
             self.scheduler.enqueue(task)
@@ -105,6 +121,7 @@ class TestTaskSchedulerRetirement:
         assert dequeued is not None
         self.scheduler.retire_agent("agent-1")
         assert dequeued["retired"] is True
+        assert dequeued["cancelled"] is True
         assert dequeued["cancelled_reason"] == "registry_delete"
         assert self.scheduler.complete(dequeued["id"]) is False
 

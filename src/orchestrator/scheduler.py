@@ -136,7 +136,8 @@ class TaskScheduler:
     def complete(self, task_id: str) -> bool:
         task = self._in_flight.get(task_id)
         if task and (
-            task.get("retired")
+            task.get("cancelled")
+            or task.get("retired")
             or self._task_agent_id(task) in self._retired_agents
         ):
             target_agent = self._task_agent_id(task)
@@ -156,7 +157,11 @@ class TaskScheduler:
         if task:
             task["retries"] += 1
             target_agent = self._task_agent_id(task)
-            if task.get("retired") or target_agent in self._retired_agents:
+            if (
+                task.get("cancelled")
+                or task.get("retired")
+                or target_agent in self._retired_agents
+            ):
                 self._record_audit(
                     "task_retry_rejected",
                     target_agent,
@@ -216,6 +221,7 @@ class TaskScheduler:
                 continue
             in_flight_retired += 1
             task["retired"] = True
+            task["cancelled"] = True
             task["retired_at"] = time.time()
             task["cancelled_reason"] = reason
             self._record_audit(
