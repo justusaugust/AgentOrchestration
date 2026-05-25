@@ -1,24 +1,90 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from typing import Dict, Optional
+
+from fastapi import APIRouter, Header, HTTPException
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.table_visibility import (
+    column_toggle_payload,
+    project_rows,
+    render_table_html,
+)
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
+
+
+def _agent_table_permissions(
+    role: Optional[str],
+    viewer_role: Optional[str],
+) -> list[str]:
+    active_role = (viewer_role or role or "").strip().lower()
+    if active_role in {"admin", "operator"}:
+        return ["agents:sensitive"]
+    return []
+
+
+@router.get("/agents/table/columns")
+async def agent_table_columns(
+    role: Optional[str] = None,
+    viewer_role: Optional[str] = Header(default=None, alias="X-Viewer-Role"),
+):
+    permissions = _agent_table_permissions(role, viewer_role)
+    return {"columns": column_toggle_payload("agents", permissions)}
+
+
+@router.post("/agents/table")
+async def render_agent_table(
+    payload: Dict,
+    role: Optional[str] = None,
+    viewer_role: Optional[str] = Header(default=None, alias="X-Viewer-Role"),
+):
+    try:
+        requested_columns = payload.get("columns")
+        rows = payload.get("rows", [])
+        permissions = _agent_table_permissions(role, viewer_role)
+        return {
+            "columns": column_toggle_payload("agents", permissions),
+            "rows": project_rows(
+                "agents",
+                rows,
+                requested_columns,
+                permissions,
+            ),
+            "html": render_table_html(
+                "agents",
+                rows,
+                requested_columns,
+                permissions,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/agents/count")
+async def agent_count():
+    return {"count": registry.count()}
 
 
 @router.get("/agents/{agent_id}")
@@ -50,9 +116,29 @@ async def stop_agent(agent_id: str):
     return {"status": "stopped"}
 
 
-@router.get("/agents/count")
-async def agent_count():
-    return {"count": registry.count()}
+@router.post("/tables/{table_name}/render")
+async def render_table(table_name: str, payload: Dict):
+    try:
+        requested_columns = payload.get("columns")
+        permissions = payload.get("permissions", [])
+        rows = payload.get("rows", [])
+        return {
+            "columns": column_toggle_payload(table_name, permissions),
+            "rows": project_rows(
+                table_name,
+                rows,
+                requested_columns,
+                permissions,
+            ),
+            "html": render_table_html(
+                table_name,
+                rows,
+                requested_columns,
+                permissions,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 # 2019-03-18T11:10:18 update
 
