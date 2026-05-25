@@ -1,19 +1,48 @@
 """Agent Executor — Handles task execution within agent sandboxes."""
 
 import asyncio
+import copy
+import os
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.request import Request, urlopen
 from uuid import uuid4
+
+from src.common.artifact_cache import ArtifactDownloadCache
 
 
 class AgentExecutor:
-    def __init__(self, max_concurrent: int = 5):
+    def __init__(
+        self,
+        max_concurrent: int = 5,
+        artifact_cache: Optional[ArtifactDownloadCache] = None,
+        artifact_cache_dir: Optional[Path] = None,
+        artifact_fetcher: Optional[Callable[[str], bytes]] = None,
+    ):
         self.max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._results: Dict[str, Any] = {}
+        cache_dir = artifact_cache_dir or os.getenv("AO_ARTIFACT_CACHE_DIR")
+        if artifact_cache is None and cache_dir is None:
+            cache_dir = (
+                Path(tempfile.gettempdir())
+                / "agent-orchestrator"
+                / "artifact-cache"
+            )
+        self._artifact_cache = (
+            artifact_cache or ArtifactDownloadCache(cache_dir)
+        )
+        self._artifact_fetcher = artifact_fetcher or _download_artifact
 
-    async def execute(self, agent_id: str, task: Dict[str, Any], handler: Callable) -> str:
+    async def execute(
+        self,
+        agent_id: str,
+        task: Dict[str, Any],
+        handler: Callable,
+    ) -> str:
         execution_id = str(uuid4())
         async with self._semaphore:
             task_obj = asyncio.create_task(
@@ -29,9 +58,16 @@ class AgentExecutor:
                 self._active_tasks.pop(execution_id, None)
         return execution_id
 
-    async def _run_execution(self, exec_id: str, agent_id: str, task: Dict, handler: Callable) -> Any:
+    async def _run_execution(
+        self,
+        exec_id: str,
+        agent_id: str,
+        task: Dict,
+        handler: Callable,
+    ) -> Any:
         start = time.time()
-        result = await handler(agent_id, task)
+        resolved_task = await self._resolve_task_artifacts(task)
+        result = await handler(agent_id, resolved_task)
         duration = time.time() - start
         return {
             "execution_id": exec_id,
@@ -56,7 +92,76 @@ class AgentExecutor:
         for task in self._active_tasks.values():
             task.cancel()
         if self._active_tasks:
-            await asyncio.gather(*self._active_tasks.values(), return_exceptions=True)
+            await asyncio.gather(
+                *self._active_tasks.values(),
+                return_exceptions=True,
+            )
+
+    async def _resolve_task_artifacts(
+        self,
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        artifacts = task.get("artifacts")
+        if not isinstance(artifacts, list):
+            return task
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._resolve_task_artifacts_sync,
+            task,
+        )
+
+    def _resolve_task_artifacts_sync(
+        self,
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        resolved_task = copy.deepcopy(task)
+        resolved_artifacts = []
+
+        for artifact in resolved_task.get("artifacts", []):
+            if not isinstance(artifact, dict):
+                resolved_artifacts.append(artifact)
+                continue
+
+            url = artifact.get("url")
+            expected_digest = _artifact_expected_sha256(artifact)
+            if not url or not expected_digest:
+                resolved_artifacts.append(artifact)
+                continue
+
+            resolution = self._artifact_cache.get_with_info(
+                str(url),
+                expected_sha256=expected_digest,
+                fetcher=lambda artifact_url=str(url): self._artifact_fetcher(
+                    artifact_url
+                ),
+            )
+            artifact["local_path"] = str(resolution.path)
+            artifact["cache"] = {
+                "hit": resolution.hit,
+                "key": resolution.key,
+                "sha256": resolution.sha256,
+                "size": resolution.size,
+            }
+            resolved_artifacts.append(artifact)
+
+        resolved_task["artifacts"] = resolved_artifacts
+        return resolved_task
+
+
+def _artifact_expected_sha256(artifact: Dict[str, Any]) -> Optional[str]:
+    for field in ("sha256", "digest", "checksum"):
+        value = artifact.get(field)
+        if value:
+            return str(value)
+    return None
+
+
+def _download_artifact(url: str) -> bytes:
+    request = Request(url, headers={"User-Agent": "agent-orchestrator/2.4"})
+    with urlopen(request, timeout=60) as response:
+        return response.read()
 
 # 2019-01-31T14:19:34 update
 
