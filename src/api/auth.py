@@ -1,6 +1,7 @@
 """Authentication and authorization helpers for API middleware."""
 
 import base64
+import binascii
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional, Set, Union
@@ -39,10 +40,14 @@ class AuthSessionGuard:
         method: str,
         workspace_id: str,
     ) -> Union[Principal, AuthFailure]:
-        if not authorization.startswith("Bearer "):
+        parts = authorization.strip().split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
             return AuthFailure(401, "Unauthorized")
 
-        token = authorization.removeprefix("Bearer ").strip()
+        token = parts[1].strip()
+        if not token:
+            return AuthFailure(401, "Unauthorized")
+
         claims = self._decode_token(token)
         if claims is None:
             return AuthFailure(401, "Malformed bearer token")
@@ -96,7 +101,7 @@ class AuthSessionGuard:
         try:
             decoded = base64.urlsafe_b64decode(f"{token}{padding}").decode()
             claims = json.loads(decoded)
-        except (ValueError, json.JSONDecodeError):
+        except (binascii.Error, ValueError, json.JSONDecodeError):
             return None
         return claims if isinstance(claims, dict) else None
 

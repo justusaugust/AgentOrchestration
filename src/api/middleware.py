@@ -11,6 +11,13 @@ from .auth import AuthFailure, AuthSessionGuard
 
 logger = logging.getLogger(__name__)
 
+AUTH_COOKIE_NAMES = (
+    "ao_access_token",
+    "ao_refresh_token",
+    "session_token",
+    "access_token",
+)
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
     def __init__(
@@ -32,7 +39,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         ):
             workspace_id = request.headers.get("X-Workspace-Id", "default")
             result = self.session_guard.authenticate(
-                request.headers.get("Authorization", ""),
+                self._credential_from_request(request),
                 request.method,
                 workspace_id,
             )
@@ -43,6 +50,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
             request.state.principal = result
         return await call_next(request)
+
+    @staticmethod
+    def _credential_from_request(request: Request) -> str:
+        authorization = request.headers.get("Authorization", "")
+        if authorization:
+            return authorization
+
+        for cookie_name in AUTH_COOKIE_NAMES:
+            token = request.cookies.get(cookie_name)
+            if token:
+                return f"Bearer {token}"
+
+        return ""
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

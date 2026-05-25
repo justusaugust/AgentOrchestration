@@ -18,6 +18,10 @@ def auth_headers(token, workspace_id="workspace-a"):
     }
 
 
+def workspace_headers(workspace_id="workspace-a"):
+    return {"X-Workspace-Id": workspace_id}
+
+
 def create_test_client():
     app = create_app(
         {
@@ -31,10 +35,33 @@ def create_test_client():
                     "revoked": True,
                     "roles": {"workspace-a": "operator"},
                 },
+                "viewer-session": {
+                    "rotation": 2,
+                    "roles": {"workspace-a": "viewer"},
+                },
             }
         }
     )
     return TestClient(app)
+
+
+def active_operator_token():
+    return make_token(
+        sub="user-1",
+        session_id="active-session",
+        session_rotation=2,
+        scopes=["orchestrator:read", "orchestrator:write"],
+        roles={"workspace-a": "operator"},
+    )
+
+
+def test_anonymous_request_is_denied():
+    client = create_test_client()
+
+    response = client.get("/api/v2/agents")
+
+    assert response.status_code == 401
+    assert "unauthorized" in response.text.lower()
 
 
 def test_stale_session_rotation_is_denied():
@@ -100,19 +127,64 @@ def test_write_with_insufficient_scope_is_denied():
     assert "scope" in response.text.lower()
 
 
-def test_authorized_workspace_operator_can_register_agent():
+def test_write_with_insufficient_workspace_role_is_denied():
     client = create_test_client()
-    operator_token = make_token(
+    viewer_token = make_token(
         sub="user-1",
-        session_id="active-session",
+        session_id="viewer-session",
         session_rotation=2,
         scopes=["orchestrator:read", "orchestrator:write"],
-        roles={"workspace-a": "operator"},
+        roles={"workspace-a": "viewer"},
     )
 
     response = client.post(
+        "/api/v2/agents?name=viewer&agent_type=worker",
+        headers=auth_headers(viewer_token),
+    )
+
+    assert response.status_code == 403
+    assert "role" in response.text.lower()
+
+
+def test_browser_cookie_token_uses_session_rotation_guard():
+    client = create_test_client()
+    stale_token = make_token(
+        sub="user-1",
+        session_id="active-session",
+        session_rotation=1,
+        scopes=["orchestrator:read"],
+        roles={"workspace-a": "operator"},
+    )
+    client.cookies.set("ao_refresh_token", stale_token)
+
+    response = client.get(
+        "/api/v2/agents",
+        headers=workspace_headers(),
+    )
+
+    assert response.status_code == 401
+    assert "stale" in response.text.lower()
+
+
+def test_browser_cookie_operator_can_complete_workflow():
+    client = create_test_client()
+    client.cookies.set("ao_access_token", active_operator_token())
+
+    response = client.post(
+        "/api/v2/agents?name=browser&agent_type=worker",
+        headers=workspace_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "registered"
+
+
+def test_authorized_workspace_operator_can_register_agent():
+    client = create_test_client()
+
+    response = client.post(
         "/api/v2/agents?name=allowed&agent_type=worker",
-        headers=auth_headers(operator_token),
+        headers=auth_headers(active_operator_token()),
     )
 
     assert response.status_code == 200
