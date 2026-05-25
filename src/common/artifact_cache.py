@@ -25,7 +25,7 @@ class CacheResolution:
     """Resolved cache entry information for artifact consumers."""
 
     path: Path
-    key: str
+    key_hash: str
     sha256: str
     size: int
     hit: bool
@@ -64,6 +64,7 @@ class ArtifactDownloadCache:
     ) -> CacheResolution:
         """Return validated cached artifact details, downloading on misses."""
         expected_digest = _normalize_sha256(expected_sha256)
+        key_hash = _cache_key_digest(key)
         metadata = self._load_metadata(key)
         existing_is_valid = (
             self._is_valid_for_metadata(key, metadata)
@@ -78,7 +79,7 @@ class ArtifactDownloadCache:
         ):
             return CacheResolution(
                 path=self._artifact_path(key, expected_digest),
-                key=key,
+                key_hash=key_hash,
                 sha256=expected_digest,
                 size=metadata["size"],
                 hit=True,
@@ -94,8 +95,8 @@ class ArtifactDownloadCache:
             if not existing_is_valid:
                 self.evict(key)
             raise ArtifactDigestMismatchError(
-                "downloaded artifact sha256 mismatch for cache key "
-                f"{key!r}: expected {expected_digest}, got {actual_digest}"
+                "downloaded artifact sha256 mismatch for cache key hash "
+                f"{key_hash}: expected {expected_digest}, got {actual_digest}"
             )
 
         artifact_path = self._artifact_path(key, expected_digest)
@@ -103,14 +104,14 @@ class ArtifactDownloadCache:
         self._write_metadata(
             key,
             {
-                "key": key,
+                "key_hash": key_hash,
                 "sha256": expected_digest,
                 "size": len(payload_bytes),
             },
         )
         return CacheResolution(
             path=artifact_path,
-            key=key,
+            key_hash=key_hash,
             sha256=expected_digest,
             size=len(payload_bytes),
             hit=False,
@@ -159,7 +160,12 @@ class ArtifactDownloadCache:
         key: str,
         metadata: Dict[str, object],
     ) -> bool:
-        if metadata.get("key") != key:
+        expected_key_hash = _cache_key_digest(key)
+        metadata_key_hash = metadata.get("key_hash")
+        if metadata_key_hash is not None:
+            if metadata_key_hash != expected_key_hash:
+                return False
+        elif metadata.get("key") != key:
             return False
         try:
             recorded_digest = _normalize_sha256(

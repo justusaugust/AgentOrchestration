@@ -91,8 +91,10 @@ class TestArtifactDownloadCache:
         metadata = cache.read_metadata("images/base.img")
 
         assert artifact_path.exists()
+        assert metadata["key_hash"] == sha256(b"images/base.img")
         assert metadata["sha256"] == sha256(payload)
         assert metadata["size"] == len(payload)
+        assert "key" not in metadata
 
     def test_missing_digest_metadata_evicts_and_redownloads(self, tmp_path):
         payload = b"artifact-with-metadata"
@@ -153,6 +155,33 @@ class TestArtifactDownloadCache:
         assert old_path.read_bytes() == old_payload
         metadata = cache.read_metadata("downloads/tool")
         assert metadata["sha256"] == sha256(old_payload)
+
+    def test_metadata_and_errors_do_not_expose_raw_cache_key(self, tmp_path):
+        payload = b"expected-artifact"
+        signed_url = "https://example.test/artifact?token=secret-token"
+        cache = ArtifactDownloadCache(tmp_path)
+
+        with pytest.raises(ArtifactDigestMismatchError) as error:
+            cache.get(
+                signed_url,
+                expected_sha256=sha256(payload),
+                fetcher=lambda: b"tampered-artifact",
+            )
+
+        assert signed_url not in str(error.value)
+        assert "secret-token" not in str(error.value)
+
+        cache.get(
+            signed_url,
+            expected_sha256=sha256(payload),
+            fetcher=lambda: payload,
+        )
+        metadata = cache.read_metadata(signed_url)
+
+        assert metadata["key_hash"] == hashlib.sha256(
+            signed_url.encode("utf-8")
+        ).hexdigest()
+        assert "key" not in metadata
 
     def test_atomic_write_uses_unique_same_dir_temp(
         self,

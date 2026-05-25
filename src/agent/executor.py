@@ -140,7 +140,7 @@ class AgentExecutor:
             artifact["local_path"] = str(resolution.path)
             artifact["cache"] = {
                 "hit": resolution.hit,
-                "key": resolution.key,
+                "key_hash": resolution.key_hash,
                 "sha256": resolution.sha256,
                 "size": resolution.size,
             }

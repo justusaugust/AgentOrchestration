@@ -59,6 +59,8 @@ def test_agent_executor_resolves_artifacts_through_cache(tmp_path):
     assert second_result["artifact_bytes"] == payload
     assert first_result["cache_sha256"] == sha256(payload)
     assert seen_tasks[0]["artifacts"][0]["local_path"]
+    assert len(seen_tasks[0]["artifacts"][0]["cache"]["key_hash"]) == 64
+    assert "key" not in seen_tasks[0]["artifacts"][0]["cache"]
     assert seen_tasks[0]["artifacts"][0]["cache"]["hit"] is False
     assert seen_tasks[1]["artifacts"][0]["cache"]["hit"] is True
     assert "local_path" not in task["artifacts"][0]
