@@ -56,7 +56,6 @@ application code into the final image.
 ```bash
 docker build \
   --build-arg AO_BUILD_CONFIG=local-only \
-  --build-arg AO_BUILD_VERSION=local \
   -t agent-orchestrator:local .
 
 python3 scripts/audit_image_metadata.py \

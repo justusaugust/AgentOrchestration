@@ -12,11 +12,9 @@ RUN python -c "import subprocess, sys, tomllib; deps = tomllib.load(open('pyproj
 
 FROM python:3.12-slim AS runtime
 
-ARG AO_BUILD_VERSION=local
-
 LABEL org.opencontainers.image.title="agent-orchestrator" \
       org.opencontainers.image.description="Agent Orchestration API runtime" \
-      org.opencontainers.image.version="${AO_BUILD_VERSION}" \
+      org.opencontainers.image.version="2.4.1" \
       org.opencontainers.image.source="https://github.com/orchestration-agent/AgentOrchestration"
 
 ENV PYTHONUNBUFFERED=1

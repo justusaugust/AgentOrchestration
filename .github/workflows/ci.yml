@@ -39,7 +39,6 @@ jobs:
         run: |
           docker build \
             --build-arg AO_BUILD_CONFIG="$BUILD_SENTINEL" \
-            --build-arg AO_BUILD_VERSION="ci-${GITHUB_SHA}" \
             -t agent-orchestrator:metadata-audit .
           python3 scripts/audit_image_metadata.py \
             agent-orchestrator:metadata-audit \
