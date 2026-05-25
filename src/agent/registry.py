@@ -1,6 +1,5 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
 import time
 import uuid
 from enum import Enum
@@ -16,13 +15,22 @@ class AgentStatus(Enum):
     TERMINATED = "terminated"
 
 
+class AgentIdValidationError(ValueError):
+    """Raised when an agent identifier is malformed."""
+
+
 class AgentRegistry:
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -42,10 +50,22 @@ class AgentRegistry:
         self._index[group].append(agent_id)
         return agent_id
 
+    @staticmethod
+    def _normalize_agent_id(agent_id: str) -> str:
+        try:
+            return str(uuid.UUID(agent_id))
+        except (AttributeError, TypeError, ValueError):
+            raise AgentIdValidationError("Malformed agent id") from None
+
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        agent_id = self._normalize_agent_id(agent_id)
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
@@ -55,6 +75,7 @@ class AgentRegistry:
         return list(agents)
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
+        agent_id = self._normalize_agent_id(agent_id)
         if agent_id not in self._agents:
             return False
         self._agents[agent_id]["status"] = status.value
@@ -62,6 +83,7 @@ class AgentRegistry:
         return True
 
     def delete(self, agent_id: str) -> bool:
+        agent_id = self._normalize_agent_id(agent_id)
         if agent_id not in self._agents:
             return False
         agent = self._agents.pop(agent_id)

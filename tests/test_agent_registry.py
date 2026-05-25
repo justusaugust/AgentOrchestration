@@ -1,5 +1,9 @@
 import pytest
-from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.registry import (
+    AgentIdValidationError,
+    AgentRegistry,
+    AgentStatus,
+)
 
 
 class TestAgentRegistry:
@@ -19,7 +23,7 @@ class TestAgentRegistry:
         assert agent["type"] == "worker.processor"
 
     def test_get_nonexistent_agent(self):
-        agent = self.registry.get("nonexistent-id")
+        agent = self.registry.get("00000000-0000-4000-8000-000000000000")
         assert agent is None
 
     def test_list_agents(self):
@@ -46,7 +50,38 @@ class TestAgentRegistry:
         assert self.registry.count() == 0
 
     def test_delete_nonexistent_agent(self):
-        assert not self.registry.delete("nonexistent-id")
+        assert not self.registry.delete("00000000-0000-4000-8000-000000000000")
+
+    def test_mixed_case_id_resolves_to_canonical_agent(self):
+        agent_id = self.registry.register("test-agent", "worker.processor")
+        mixed_case_id = agent_id.upper()
+
+        agent = self.registry.get(mixed_case_id)
+
+        assert agent is not None
+        assert agent["id"] == agent_id
+
+    def test_malformed_id_fails_before_lookup(self):
+        self.registry._agents["not-a-uuid"] = {"id": "not-a-uuid"}
+
+        with pytest.raises(AgentIdValidationError):
+            self.registry.get("not-a-uuid")
+
+    def test_malformed_id_fails_before_status_mutation(self):
+        agent_id = self.registry.register("test-agent", "worker.processor")
+
+        with pytest.raises(AgentIdValidationError):
+            self.registry.update_status("not-a-uuid", AgentStatus.RUNNING)
+
+        assert self.registry.get(agent_id)["status"] == "pending"
+
+    def test_malformed_id_fails_before_delete_mutation(self):
+        agent_id = self.registry.register("test-agent", "worker.processor")
+
+        with pytest.raises(AgentIdValidationError):
+            self.registry.delete("not-a-uuid")
+
+        assert self.registry.get(agent_id) is not None
 
 # 2019-01-23T10:28:57 update
 
