@@ -1,0 +1,15 @@
+# Dependency review security exceptions.
+#
+# Each active dependency-review override must have a durable record here.
+# The CI validator rejects missing fields, duplicate dependency/advisory pairs,
+# and records whose expiration date has passed.
+#
+# Fields:
+# - dependency: Package URL (purl) for the affected dependency, including version
+#   when the exception is version-specific. Example: pkg:pypi/django@4.2.0
+# - advisory: GitHub Security Advisory ID allowed by dependency-review-action.
+#   Example: GHSA-abcd-1234-efgh
+# - owner: Team, handle, or email responsible for renewing or removing the entry.
+# - reason: Short justification for why this temporary exception is acceptable.
+# - expiration: YYYY-MM-DD date after which CI fails until renewed or removed.
+exceptions: []

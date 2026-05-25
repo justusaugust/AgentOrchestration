@@ -6,7 +6,44 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  dependency-exceptions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Validate dependency exception manifest
+        run: |
+          uv run python scripts/validate_dependency_exceptions.py \
+            --dependency-review-config "$RUNNER_TEMP/dependency-review-config.yml" \
+            --summary "$RUNNER_TEMP/dependency-exceptions.md"
+      - name: Append dependency exception summary
+        run: cat "$RUNNER_TEMP/dependency-exceptions.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Dependency Review
+        id: dependency-review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          config-file: ${{ runner.temp }}/dependency-review-config.yml
+      - name: Enforce dependency review exceptions
+        if: github.event_name == 'pull_request'
+        env:
+          VULNERABLE_CHANGES: ${{ steps.dependency-review.outputs.vulnerable-changes }}
+        run: |
+          printf '%s' "$VULNERABLE_CHANGES" > "$RUNNER_TEMP/vulnerable-changes.json"
+          uv run python scripts/validate_dependency_exceptions.py \
+            --vulnerable-changes "$RUNNER_TEMP/vulnerable-changes.json" \
+            --used-summary "$RUNNER_TEMP/dependency-exceptions-used.md"
+          cat "$RUNNER_TEMP/dependency-exceptions-used.md" >> "$GITHUB_STEP_SUMMARY"
+
   test:
     runs-on: ubuntu-latest
     strategy:
