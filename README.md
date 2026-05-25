@@ -47,6 +47,27 @@ ao deploy examples/hello-agent.yaml
 ao status --watch
 ```
 
+## Container Image
+
+The repository includes a multi-stage Docker image that keeps build-only
+configuration in the builder stage and copies only runtime dependencies and
+application code into the final image.
+
+```bash
+docker build \
+  --build-arg AO_BUILD_CONFIG=local-only \
+  --build-arg AO_BUILD_VERSION=local \
+  -t agent-orchestrator:local .
+
+python3 scripts/audit_image_metadata.py \
+  agent-orchestrator:local \
+  --forbidden local-only
+```
+
+CI builds the image with a sentinel build value and audits the final image
+history, config, and runtime labels so build-only values do not persist in
+distributed image metadata.
+
 ## Documentation
 
 Full documentation at [docs.agent-orchestrator.io](https://docs.agent-orchestrator.io)

@@ -14,7 +14,13 @@ class StepStatus(Enum):
 
 
 class WorkflowStep:
-    def __init__(self, name: str, handler: Callable, retries: int = 0, timeout: int = 300):
+    def __init__(
+        self,
+        name: str,
+        handler: Callable,
+        retries: int = 0,
+        timeout: int = 300,
+    ):
         self.id = str(uuid4())
         self.name = name
         self.handler = handler
@@ -81,6 +87,7 @@ class WorkflowManager:
 
         workflow.status = StepStatus.COMPLETED
         return True
+
 
 # 2019-03-27T19:58:07 update
 

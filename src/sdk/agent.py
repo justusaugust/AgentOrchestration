@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class BaseAgent(ABC):
-    def __init__(self, agent_id: str, name: str, config: Optional[Dict] = None):
+    def __init__(
+        self, agent_id: str, name: str, config: Optional[Dict] = None
+    ):
         self.agent_id = agent_id
         self.name = name
         self.config = config or {}
@@ -49,6 +51,7 @@ class BaseAgent(ABC):
 
     def get_metadata(self, key: str, default: Any = None) -> Any:
         return self._metadata.get(key, default)
+
 
 # 2019-04-19T17:53:22 update
 

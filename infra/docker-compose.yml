@@ -1,0 +1,13 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        AO_BUILD_VERSION: ${AO_BUILD_VERSION:-local}
+    image: agent-orchestrator:${AO_BUILD_VERSION:-local}
+    ports:
+      - "8000:8000"
+    environment:
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-*}

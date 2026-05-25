@@ -27,3 +27,20 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  image-metadata-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image with sentinel build config
+        env:
+          BUILD_SENTINEL: internal-config-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker build \
+            --build-arg AO_BUILD_CONFIG="$BUILD_SENTINEL" \
+            --build-arg AO_BUILD_VERSION="ci-${GITHUB_SHA}" \
+            -t agent-orchestrator:metadata-audit .
+          python3 scripts/audit_image_metadata.py \
+            agent-orchestrator:metadata-audit \
+            --forbidden "$BUILD_SENTINEL"
