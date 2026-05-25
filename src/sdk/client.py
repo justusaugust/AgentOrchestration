@@ -2,33 +2,92 @@
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 
 class OrchestratorClient:
-    def __init__(self, base_url: str = None, api_key: str = None):
-        self.base_url = base_url or os.getenv("AO_API_URL", "https://api.agent-orchestrator.io")
+    _RETRYABLE_STATUS_CODES = {502, 503}
+    _IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        retry_count: int = 0,
+        retry_backoff: float = 0.0,
+        retry_sleep: Optional[Callable[[float], None]] = None,
+    ):
+        self.base_url = base_url or os.getenv(
+            "AO_API_URL",
+            "https://api.agent-orchestrator.io",
+        )
         self.api_key = api_key or os.getenv("AO_API_KEY", "")
         self._session = None
+        self.retry_count = max(0, retry_count)
+        self.retry_backoff = max(0.0, retry_backoff)
+        self.retry_sleep = retry_sleep or time.sleep
 
-    def _request(self, method: str, path: str, data: Dict = None) -> Dict:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        data: Optional[Dict[str, Any]] = None,
+        retry_count: Optional[int] = None,
+        retry_backoff: Optional[float] = None,
+    ) -> Dict[str, Any]:
         url = f"{self.base_url}/api/v2{path}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         body = json.dumps(data).encode() if data else None
-        req = Request(url, data=body, headers=headers, method=method)
+        method = method.upper()
+        attempts_remaining = self._retry_count(method, retry_count)
+        backoff = self._retry_backoff(retry_backoff)
 
-        try:
-            with urlopen(req) as resp:
-                return json.loads(resp.read().decode())
-        except HTTPError as e:
-            return {"error": e.code, "message": e.reason}
+        while True:
+            req = Request(url, data=body, headers=headers, method=method)
+            try:
+                with urlopen(req) as resp:
+                    return json.loads(resp.read().decode())
+            except HTTPError as e:
+                if not self._should_retry(e, attempts_remaining):
+                    return {"error": e.code, "message": e.reason}
 
-    def register_agent(self, name: str, agent_type: str, config: Dict = None) -> Dict:
+                attempts_remaining -= 1
+                if backoff:
+                    self.retry_sleep(backoff)
+
+    def _retry_count(self, method: str, retry_count: Optional[int]) -> int:
+        if method not in self._IDEMPOTENT_METHODS:
+            return 0
+
+        if retry_count is None:
+            retry_count = self.retry_count
+
+        return max(0, retry_count)
+
+    def _retry_backoff(self, retry_backoff: Optional[float]) -> float:
+        if retry_backoff is None:
+            retry_backoff = self.retry_backoff
+
+        return max(0.0, retry_backoff)
+
+    def _should_retry(self, error: HTTPError, attempts_remaining: int) -> bool:
+        return (
+            attempts_remaining > 0
+            and error.code in self._RETRYABLE_STATUS_CODES
+        )
+
+    def register_agent(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self._request("POST", "/agents", {
             "name": name,
             "agent_type": agent_type,
