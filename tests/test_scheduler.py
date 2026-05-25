@@ -1,4 +1,7 @@
+import asyncio
+
 import pytest
+from src.orchestrator.engine import OrchestrationEngine
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -12,7 +15,6 @@ class TestTaskScheduler:
 
     def test_dequeue_task(self):
         self.scheduler.enqueue({"type": "test", "payload": {"data": 1}})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert task is not None
         assert task["type"] == "test"
@@ -20,21 +22,142 @@ class TestTaskScheduler:
     def test_enqueue_multiple_priorities(self):
         self.scheduler.enqueue({"type": "low"}, priority=1)
         self.scheduler.enqueue({"type": "high"}, priority=10)
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert task["type"] == "high"
 
     def test_complete_task(self):
         self.scheduler.enqueue({"type": "test"})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.complete(task["id"])
 
     def test_fail_task_with_retry(self):
         self.scheduler.enqueue({"type": "test"})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+
+class TestTaskSchedulerRetirement:
+    """Regression tests for issue #4389: scheduler retirement semantics."""
+
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+
+    def test_schedule_preserves_full_task_through_dequeue(self):
+        task = {
+            "type": "work",
+            "target_agent": "agent-1",
+            "payload": {"x": 42},
+        }
+        task_id = self.scheduler.schedule(task, delay=0)
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is not None
+        assert result["id"] == task_id
+        assert result.get("target_agent") == "agent-1"
+        assert result.get("payload") == {"x": 42}
+
+    def test_retire_agent_removes_queued_tasks(self):
+        self.scheduler.enqueue({"type": "work", "target_agent": "agent-1"})
+        summary = self.scheduler.retire_agent("agent-1")
+
+        assert summary["queued_removed"] == 1
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_retire_agent_removes_scheduled_future_tasks(self):
+        task = {"type": "work", "target_agent": "agent-1"}
+        self.scheduler.schedule(task, delay=60)
+        summary = self.scheduler.retire_agent("agent-1")
+        assert summary["scheduled_removed"] == 1
+
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is None
+
+    def test_retire_agent_dequeue_after_due_returns_none(self):
+        task = {"type": "work", "target_agent": "agent-1"}
+        self.scheduler.schedule(task, delay=0)
+        self.scheduler.retire_agent("agent-1")
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is None
+
+    def test_schedule_rejects_retired_agent_before_commit(self):
+        self.scheduler.retire_agent("agent-retired")
+        task = {"type": "work", "target_agent": "agent-retired"}
+        with pytest.raises(ValueError):
+            self.scheduler.schedule(task, delay=0)
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_enqueue_rejects_retired_agent_before_commit(self):
+        self.scheduler.retire_agent("agent-retired")
+        task = {"type": "work", "target_agent": "agent-retired"}
+
+        with pytest.raises(ValueError):
+            self.scheduler.enqueue(task)
+
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_complete_returns_false_for_retired_in_flight_task(self):
+        task = {
+            "type": "work",
+            "target_agent": "agent-1",
+            "payload": {"data": "secret"},
+        }
+        self.scheduler.enqueue(task)
+        dequeued = asyncio.run(self.scheduler.dequeue())
+        assert dequeued is not None
+        self.scheduler.retire_agent("agent-1")
+        assert dequeued["retired"] is True
+        assert dequeued["cancelled_reason"] == "registry_delete"
+        assert self.scheduler.complete(dequeued["id"]) is False
+
+    def test_fail_returns_false_for_retired_in_flight_task(self):
+        task = {"type": "work", "target_agent": "agent-1"}
+        self.scheduler.enqueue(task)
+        dequeued = asyncio.run(self.scheduler.dequeue())
+        assert dequeued is not None
+        self.scheduler.retire_agent("agent-1")
+
+        assert self.scheduler.fail(dequeued["id"]) is False
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_retire_agent_audit_event_omits_payload(self):
+        task = {
+            "type": "work",
+            "target_agent": "agent-1",
+            "payload": {"secret": "value"},
+        }
+        self.scheduler.enqueue(task)
+        dequeued = asyncio.run(self.scheduler.dequeue())
+        assert dequeued is not None
+        self.scheduler.retire_agent("agent-1")
+        audit_log = self.scheduler.audit_log()
+        retirement_events = [
+            e for e in audit_log if e.get("event") == "task_retired_in_flight"
+        ]
+        assert len(retirement_events) >= 1
+        for event in retirement_events:
+            assert "payload" not in event
+            assert event["agent_id"] == "agent-1"
+            assert event["task_id"] == dequeued["id"]
+            assert event["queue"] is None
+
+
+class TestOrchestrationEngineRetirementWiring:
+    """Regression tests for issue #4389."""
+
+    def setup_method(self):
+        self.engine = OrchestrationEngine()
+
+    def test_registry_delete_retires_agent_in_scheduler(self):
+        agent_id = self.engine.registry.register(
+            "test-agent",
+            "worker.processor",
+        )
+        task = {"type": "work", "target_agent": agent_id}
+        self.engine.scheduler.schedule(task, delay=60)
+        self.engine.registry.delete(agent_id)
+        assert self.engine.scheduler.is_agent_retired(agent_id)
+        result = asyncio.run(self.engine.scheduler.dequeue())
+        assert result is None
+
 
 # 2019-01-09T19:07:03 update
 

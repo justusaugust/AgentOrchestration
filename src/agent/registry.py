@@ -1,10 +1,10 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
 import time
 import uuid
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class AgentStatus(Enum):
@@ -16,13 +16,51 @@ class AgentStatus(Enum):
     TERMINATED = "terminated"
 
 
+@dataclass(frozen=True)
+class AgentRegistryEvent:
+    event: str
+    agent_id: str
+    agent: Dict[str, Any]
+    status: Optional[str]
+    previous_status: Optional[str]
+    reason: str
+    timestamp: float
+
+
 class AgentRegistry:
+    _TERMINAL_STATUSES = {
+        AgentStatus.STOPPED.value,
+        AgentStatus.FAILED.value,
+        AgentStatus.TERMINATED.value,
+    }
+
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._listeners: List[Callable[[AgentRegistryEvent], None]] = []
+        self._audit_log: List[Dict[str, Any]] = []
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def add_listener(
+        self,
+        listener: Callable[[AgentRegistryEvent], None],
+    ) -> None:
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def remove_listener(
+        self,
+        listener: Callable[[AgentRegistryEvent], None],
+    ) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -45,7 +83,11 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
@@ -57,8 +99,32 @@ class AgentRegistry:
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
         if agent_id not in self._agents:
             return False
+        previous_status = self._agents[agent_id]["status"]
+        if self._is_invalid_transition(previous_status, status.value):
+            self._record_audit(
+                "registry_status_rejected",
+                agent_id,
+                from_status=previous_status,
+                to_status=status.value,
+                reason="terminal_status",
+            )
+            return False
+
         self._agents[agent_id]["status"] = status.value
-        self._agents[agent_id]["updated_at"] = time.time()
+        timestamp = time.time()
+        self._agents[agent_id]["updated_at"] = timestamp
+        if status.value in self._TERMINAL_STATUSES:
+            self._notify(
+                AgentRegistryEvent(
+                    event="agent_status_changed",
+                    agent_id=agent_id,
+                    agent=self._snapshot_agent(self._agents[agent_id]),
+                    status=status.value,
+                    previous_status=previous_status,
+                    reason="terminal_status",
+                    timestamp=timestamp,
+                )
+            )
         return True
 
     def delete(self, agent_id: str) -> bool:
@@ -68,10 +134,72 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        timestamp = time.time()
+        self._notify(
+            AgentRegistryEvent(
+                event="agent_deleted",
+                agent_id=agent_id,
+                agent=self._snapshot_agent(agent),
+                status=agent["status"],
+                previous_status=agent["status"],
+                reason="registry_delete",
+                timestamp=timestamp,
+            )
+        )
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def audit_log(self) -> List[Dict[str, Any]]:
+        return list(self._audit_log)
+
+    def _is_invalid_transition(
+        self,
+        previous_status: str,
+        status: str,
+    ) -> bool:
+        return (
+            previous_status in self._TERMINAL_STATUSES
+            and status != previous_status
+        )
+
+    def _notify(self, event: AgentRegistryEvent) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception as exc:
+                self._record_audit(
+                    "registry_listener_failed",
+                    event.agent_id,
+                    reason=exc.__class__.__name__,
+                )
+
+    def _snapshot_agent(self, agent: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": agent["id"],
+            "name": agent["name"],
+            "type": agent["type"],
+            "status": agent["status"],
+            "created_at": agent["created_at"],
+            "updated_at": agent["updated_at"],
+            "version": agent["version"],
+            "metrics": dict(agent["metrics"]),
+        }
+
+    def _record_audit(
+        self,
+        event: str,
+        agent_id: str,
+        **fields: Any,
+    ) -> None:
+        record = {
+            "event": event,
+            "agent_id": agent_id,
+            "timestamp": time.time(),
+        }
+        record.update(fields)
+        self._audit_log.append(record)
 
 # 2019-01-29T11:24:49 update
 

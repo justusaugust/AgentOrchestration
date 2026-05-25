@@ -1,9 +1,8 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -29,57 +28,287 @@ class PriorityQueue:
     def __len__(self) -> int:
         return len(self._queue)
 
+    def remove_if(self, predicate: Callable[[Any], bool]) -> List[Any]:
+        removed = []
+        kept = []
+        for entry in self._queue:
+            item = entry[2]
+            if predicate(item):
+                removed.append(item)
+            else:
+                kept.append(entry)
+        if removed:
+            self._queue = kept
+            heapq.heapify(self._queue)
+        return removed
+
 
 class TaskScheduler:
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
+        self._scheduled: Dict[str, Dict[str, Any]] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._retired_agents: Dict[str, str] = {}
+        self._audit_log: List[Dict[str, Any]] = []
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
+        self._reject_if_retired(task, None, queue, "enqueue")
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
         task["retries"] = 0
-
-        if queue not in self._queues:
-            self._queues[queue] = PriorityQueue()
-        self._queues[queue].push(task, priority)
+        self._push_task(task, queue, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
+        self._reject_if_retired(task, None, queue, "schedule")
         task_id = str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["queue"] = queue
+        task["priority"] = priority
+        self._scheduled[task_id] = {
+            "run_at": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid
+            for tid, scheduled in self._scheduled.items()
+            if scheduled["run_at"] <= now
+        ]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            scheduled = self._scheduled.pop(tid)
+            task = scheduled["task"]
+            target_agent = self._task_agent_id(task)
+            if target_agent in self._retired_agents:
+                self._record_audit(
+                    "task_skipped_retired",
+                    target_agent,
+                    task.get("id"),
+                    scheduled["queue"],
+                    reason="scheduled_dispatch",
+                )
+                continue
+            task["enqueued_at"] = time.time()
+            task["retries"] = task.get("retries", 0)
+            self._push_task(task, scheduled["queue"], scheduled["priority"])
 
         if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
-            if task:
+            while len(self._queues[queue]) > 0:
+                task = self._queues[queue].pop()
+                if not task:
+                    continue
+                target_agent = self._task_agent_id(task)
+                if target_agent in self._retired_agents:
+                    self._record_audit(
+                        "task_skipped_retired",
+                        target_agent,
+                        task.get("id"),
+                        queue,
+                        reason="dequeue",
+                    )
+                    continue
                 self._in_flight[task["id"]] = task
                 return task
         return None
 
     def complete(self, task_id: str) -> bool:
+        task = self._in_flight.get(task_id)
+        if task and (
+            task.get("retired")
+            or self._task_agent_id(task) in self._retired_agents
+        ):
+            target_agent = self._task_agent_id(task)
+            self._in_flight.pop(task_id, None)
+            self._record_audit(
+                "task_completion_rejected",
+                target_agent,
+                task_id,
+                None,
+                reason="retired_agent",
+            )
+            return False
         return self._in_flight.pop(task_id, None) is not None
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
             task["retries"] += 1
+            target_agent = self._task_agent_id(task)
+            if task.get("retired") or target_agent in self._retired_agents:
+                self._record_audit(
+                    "task_retry_rejected",
+                    target_agent,
+                    task_id,
+                    queue,
+                    reason="retired_agent",
+                )
+                return False
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def bind_registry(self, registry: Any) -> None:
+        registry.add_listener(self._handle_registry_event)
+
+    def retire_agent(
+        self,
+        agent_id: str,
+        reason: str = "registry_delete",
+    ) -> Dict[str, int]:
+        self._retired_agents[agent_id] = reason
+        queued_removed = 0
+        scheduled_removed = 0
+        in_flight_retired = 0
+
+        for queue_name, queue in self._queues.items():
+            removed = queue.remove_if(
+                lambda task: self._task_agent_id(task) == agent_id
+            )
+            queued_removed += len(removed)
+            for task in removed:
+                self._record_audit(
+                    "task_removed_queued",
+                    agent_id,
+                    task.get("id"),
+                    queue_name,
+                    reason=reason,
+                )
+
+        for task_id, scheduled in list(self._scheduled.items()):
+            task = scheduled["task"]
+            if self._task_agent_id(task) != agent_id:
+                continue
+            self._scheduled.pop(task_id)
+            scheduled_removed += 1
+            self._record_audit(
+                "task_removed_scheduled",
+                agent_id,
+                task_id,
+                scheduled["queue"],
+                reason=reason,
+            )
+
+        for task_id, task in list(self._in_flight.items()):
+            if self._task_agent_id(task) != agent_id:
+                continue
+            in_flight_retired += 1
+            task["retired"] = True
+            task["retired_at"] = time.time()
+            task["cancelled_reason"] = reason
+            self._record_audit(
+                "task_retired_in_flight",
+                agent_id,
+                task_id,
+                None,
+                reason=reason,
+            )
+
+        summary = {
+            "queued_removed": queued_removed,
+            "scheduled_removed": scheduled_removed,
+            "in_flight_retired": in_flight_retired,
+        }
+        self._record_audit(
+            "agent_retired",
+            agent_id,
+            None,
+            None,
+            reason=reason,
+            counts=summary,
+        )
+        return summary
+
+    def is_agent_retired(self, agent_id: str) -> bool:
+        return agent_id in self._retired_agents
+
+    def audit_log(self) -> List[Dict[str, Any]]:
+        return list(self._audit_log)
+
+    def _handle_registry_event(self, event: Any) -> None:
+        if event.event == "agent_deleted":
+            self.retire_agent(event.agent_id, reason=event.reason)
+        elif (
+            event.event == "agent_status_changed"
+            and event.status in {"stopped", "failed", "terminated"}
+        ):
+            self.retire_agent(event.agent_id, reason=event.status)
+
+    def _reject_if_retired(
+        self,
+        task: Dict[str, Any],
+        task_id: Optional[str],
+        queue: Optional[str],
+        operation: str,
+    ) -> None:
+        target_agent = self._task_agent_id(task)
+        if target_agent in self._retired_agents:
+            self._record_audit(
+                "task_rejected",
+                target_agent,
+                task_id,
+                queue,
+                reason=f"retired_agent:{operation}",
+            )
+            raise ValueError(f"Agent {target_agent} is retired")
+
+    def _task_agent_id(self, task: Dict[str, Any]) -> Optional[str]:
+        return task.get("target_agent") or task.get("agent_id")
+
+    def _push_task(
+        self,
+        task: Dict[str, Any],
+        queue: str,
+        priority: int,
+    ) -> None:
+        task["queue"] = queue
+        task["priority"] = priority
+        if queue not in self._queues:
+            self._queues[queue] = PriorityQueue()
+        self._queues[queue].push(task, priority)
+
+    def _record_audit(
+        self,
+        event: str,
+        agent_id: Optional[str],
+        task_id: Optional[str],
+        queue: Optional[str],
+        reason: str,
+        counts: Optional[Dict[str, int]] = None,
+    ) -> None:
+        record = {
+            "event": event,
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "queue": queue,
+            "reason": reason,
+            "timestamp": time.time(),
+        }
+        if counts is not None:
+            record["counts"] = dict(counts)
+        self._audit_log.append(record)
 
 # 2019-04-25T08:37:12 update
 

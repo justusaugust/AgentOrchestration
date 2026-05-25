@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -47,6 +46,56 @@ class TestAgentRegistry:
 
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
+
+
+class TestAgentRegistryRetirement:
+    """Regression tests for issue #4389."""
+
+    def setup_method(self):
+        self.registry = AgentRegistry()
+
+    def test_add_listener_receives_terminated_event(self):
+        events = []
+        agent_id = self.registry.register("test-agent", "worker.processor")
+        self.registry.add_listener(events.append)
+
+        assert self.registry.update_status(agent_id, AgentStatus.TERMINATED)
+
+        assert len(events) == 1
+        event = events[0]
+        assert event.event == "agent_status_changed"
+        assert event.agent_id == agent_id
+        assert event.previous_status == AgentStatus.PENDING.value
+        assert event.status == AgentStatus.TERMINATED.value
+        assert event.agent["id"] == agent_id
+        assert "config" not in event.agent
+
+    def test_update_terminated_to_running_preserves_status(self):
+        agent_id = self.registry.register("test-agent", "worker.processor")
+        self.registry.update_status(agent_id, AgentStatus.TERMINATED)
+
+        assert not self.registry.update_status(agent_id, AgentStatus.RUNNING)
+
+        agent = self.registry.get(agent_id)
+        assert agent["status"] == AgentStatus.TERMINATED.value
+        audit = self.registry.audit_log()
+        assert audit[-1]["event"] == "registry_status_rejected"
+        assert audit[-1]["agent_id"] == agent_id
+        assert audit[-1]["from_status"] == AgentStatus.TERMINATED.value
+        assert audit[-1]["to_status"] == AgentStatus.RUNNING.value
+
+    def test_delete_notifies_listeners(self):
+        events = []
+        agent_id = self.registry.register("test-agent", "worker.processor")
+        self.registry.add_listener(events.append)
+
+        assert self.registry.delete(agent_id)
+
+        assert len(events) == 1
+        assert events[0].event == "agent_deleted"
+        assert events[0].agent_id == agent_id
+        assert events[0].agent["id"] == agent_id
+        assert "config" not in events[0].agent
 
 # 2019-01-23T10:28:57 update
 
